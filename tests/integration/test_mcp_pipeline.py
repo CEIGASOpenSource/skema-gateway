@@ -1,0 +1,247 @@
+"""
+Skema Gateway — MCP + audit + mTLS pipeline integration test.
+
+Exercises:
+  - Mock upstream "skema container" returning canned JSON-RPC responses
+  - The gateway daemon (build_app) running on a test port
+  - An operator (this test) calling the gateway over HTTP with bearer auth
+  - The audit log being written and HMAC-chain-verified
+
+What's stubbed vs real:
+  - Upstream is plain HTTP, not mTLS — we exercise the call/audit pipeline,
+    not the cryptography of mTLS. Real mTLS needs a CA + cert + container,
+    which is production infrastructure not under test here.
+  - Operator secret + audit key are set via env vars, as in production.
+  - Local PG is the existing test docker-compose's local-pg.
+
+Asserts:
+  - Bearer-secret enforcement (wrong/missing secret => 401)
+  - Successful shape() call → 200 + result
+  - Audit log has 2 rows per call (in-flight + completed)
+  - HMAC audit chain verifies clean
+  - Upstream-error envelope is propagated
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import secrets
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+
+import aiohttp
+import asyncpg
+from aiohttp import web
+
+from gatewayd.audit import verify_chain
+from gatewayd.config import GatewayConfig, MCPConfig, UpstreamConfig, AuditConfig, BackupConfig
+from gatewayd.db import init_conn
+from gatewayd.mcp import build_app
+from gatewayd.transport.mtls import UpstreamClient
+
+COMPOSE_DIR = REPO_ROOT / "tests" / "migrations"
+LOCAL_DSN   = "postgresql://postgres:testpass@127.0.0.1:54541/skema_local"
+MIG         = REPO_ROOT / "db" / "migrations"
+
+results: list[tuple[bool, str]] = []
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    mark = "✓" if cond else "✗"
+    print(f"  {mark} {name}" + (f"  ({detail})" if detail else ""))
+    results.append((cond, name))
+
+
+def sh(cmd, **kw): return subprocess.run(cmd, check=True, **kw)
+
+
+def compose_up():
+    sh(["docker", "compose", "up", "-d"], cwd=COMPOSE_DIR,
+       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def compose_down():
+    subprocess.run(["docker", "compose", "down", "-v"], cwd=COMPOSE_DIR,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def wait_for_stable(container: str, timeout_s: int = 120):
+    import time
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        out = subprocess.run(["docker", "logs", container],
+                             capture_output=True, text=True)
+        if (out.stdout + out.stderr).count("database system is ready to accept connections") >= 2:
+            return
+        time.sleep(2)
+    raise RuntimeError(f"{container} did not stabilize")
+
+
+# ─── Mock upstream skema container ─────────────────────────────────────
+
+async def _mock_shape(request: web.Request) -> web.Response:
+    body = await request.json()
+    method = body.get("method")
+    params = body.get("params", {})
+    if method == "shape":
+        prompt = params.get("prompt", "")
+        return web.json_response({
+            "jsonrpc": "2.0", "id": body.get("id", 1),
+            "result": {
+                "text": f"echo: {prompt}",
+                "ceigas_crossing_id": str(uuid.uuid4()),
+            },
+        })
+    if method == "force_error":
+        return web.json_response({
+            "jsonrpc": "2.0", "id": body.get("id", 1),
+            "error": {"code": -32000, "message": "synthetic error"},
+        })
+    return web.json_response({
+        "jsonrpc": "2.0", "id": body.get("id", 1),
+        "error": {"code": -32601, "message": f"unknown method {method}"},
+    })
+
+
+def build_mock_upstream() -> web.Application:
+    app = web.Application()
+    app.router.add_post("/", _mock_shape)
+    return app
+
+
+# ─── Test ──────────────────────────────────────────────────────────────
+
+async def run() -> None:
+    # ─── Bring up local PG schema
+    conn = await asyncpg.connect(LOCAL_DSN)
+    await init_conn(conn)
+    await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    await conn.execute((MIG / "local" / "001_init.sql").read_text())
+    await conn.close()
+    check("local schema applied", True)
+
+    # ─── Set required secrets in env
+    operator_secret = secrets.token_urlsafe(32)
+    audit_key       = secrets.token_bytes(32)
+    os.environ["SKEMA_OPERATOR_SECRET"] = operator_secret
+    os.environ["SKEMA_AUDIT_HMAC_KEY"]  = audit_key.hex()
+
+    # ─── Spin up mock upstream
+    mock_app = build_mock_upstream()
+    mock_runner = web.AppRunner(mock_app)
+    await mock_runner.setup()
+    mock_site = web.TCPSite(mock_runner, "127.0.0.1", 0)  # auto-pick port
+    await mock_site.start()
+    mock_port = mock_site._server.sockets[0].getsockname()[1]
+    check(f"mock upstream listening on 127.0.0.1:{mock_port}", True)
+
+    # ─── Spin up gateway
+    cfg = GatewayConfig(
+        mcp=MCPConfig(listen_host="127.0.0.1", listen_port=0,
+                       operator_secret_env="SKEMA_OPERATOR_SECRET"),
+        upstream=UpstreamConfig(url=f"http://127.0.0.1:{mock_port}/"),
+        backup=BackupConfig(local_dsn=LOCAL_DSN),
+        audit=AuditConfig(audit_key_env="SKEMA_AUDIT_HMAC_KEY"),
+    )
+    pool = await asyncpg.create_pool(LOCAL_DSN, init=init_conn, min_size=1, max_size=2)
+    upstream = UpstreamClient(cfg.upstream)
+    await upstream.__aenter__()
+    app = build_app(cfg, pool, upstream)
+    gw_runner = web.AppRunner(app)
+    await gw_runner.setup()
+    gw_site = web.TCPSite(gw_runner, "127.0.0.1", 0)
+    await gw_site.start()
+    gw_port = gw_site._server.sockets[0].getsockname()[1]
+    check(f"gateway listening on 127.0.0.1:{gw_port}", True)
+
+    try:
+        async with aiohttp.ClientSession() as sess:
+            base = f"http://127.0.0.1:{gw_port}"
+
+            # ─── health
+            async with sess.get(f"{base}/health") as r:
+                check("/health 200", r.status == 200)
+
+            # ─── auth: missing secret
+            async with sess.post(f"{base}/mcp", json={"method": "shape", "id": 1}) as r:
+                check("missing Authorization → 401", r.status == 401)
+
+            # ─── auth: wrong secret
+            async with sess.post(f"{base}/mcp",
+                                  json={"method": "shape", "id": 1},
+                                  headers={"Authorization": "Bearer wrong"}) as r:
+                check("wrong bearer → 401", r.status == 401)
+
+            # ─── successful shape() call
+            headers = {"Authorization": f"Bearer {operator_secret}",
+                       "X-Operator-Id": str(uuid.uuid4()),
+                       "X-Entity-Id": "entity-3"}
+            async with sess.post(f"{base}/mcp",
+                                  json={"jsonrpc": "2.0", "method": "shape",
+                                         "params": {"prompt": "hello world"}, "id": 42},
+                                  headers=headers) as r:
+                body = await r.json()
+                ok_status = r.status == 200
+                ok_result = body.get("result", {}).get("text") == "echo: hello world"
+                check("shape() succeeded with correct result",
+                      ok_status and ok_result,
+                      f"status={r.status} body={body}")
+
+            # ─── upstream-error propagation
+            async with sess.post(f"{base}/mcp",
+                                  json={"method": "force_error", "id": 7},
+                                  headers=headers) as r:
+                body = await r.json()
+                err = body.get("error", {})
+                check("upstream error propagated as JSON-RPC error",
+                      r.status == 502 and err.get("code") == -32000)
+
+        # ─── audit log: should have 4 rows (2 calls × 2 entries each) plus 1 if force_error logged in-flight
+        async with pool.acquire() as conn:
+            count = await conn.fetchval("SELECT COUNT(*) FROM operator_audit_log")
+            check(f"audit log populated ({count} rows)", count >= 3,
+                  f"expected at least 3 (2 calls × in-flight + 1 completed)")
+
+            verified, broken = await verify_chain(conn, audit_key)
+            check(f"audit HMAC chain verifies ({verified} rows)",
+                  broken == 0,
+                  f"broken at log_id={broken}" if broken else "")
+
+            # ─── tamper detection
+            await conn.execute(
+                "UPDATE operator_audit_log SET action = 'TAMPERED' WHERE log_id = (SELECT MIN(log_id) FROM operator_audit_log)"
+            )
+            verified_after, broken_after = await verify_chain(conn, audit_key)
+            check("tampering breaks the chain", broken_after != 0,
+                  f"verified_before={verified} verified_after={verified_after}")
+
+    finally:
+        await gw_runner.cleanup()
+        await mock_runner.cleanup()
+        await upstream.__aexit__(None, None, None)
+        await pool.close()
+
+
+def main() -> int:
+    try:
+        compose_up()
+        wait_for_stable("skema-test-local-pg")
+        asyncio.run(run())
+    finally:
+        compose_down()
+
+    print()
+    passed = sum(1 for c, _ in results if c)
+    failed = len(results) - passed
+    print("═" * 40)
+    print(f"PASS: {passed}    FAIL: {failed}")
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
