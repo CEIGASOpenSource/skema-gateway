@@ -26,10 +26,12 @@ from gatewayd.transport.fingerprint import fingerprint
 
 @dataclass
 class RedemptionResult:
-    cert_pem:     str
-    key_pem:      str
-    ca_pem:       str
-    upstream_url: str
+    cert_pem:        str
+    key_pem:         str
+    ca_pem:          str
+    upstream_url:    str
+    upstream_bearer: str   # mcp_<...> token; per project_skema_gateway, validated
+                           # against `mcp_client_tokens` on the container's parallax DB
 
 
 class RedemptionError(RuntimeError):
@@ -43,7 +45,8 @@ async def redeem(edge_url: str, anchor_code: str,
     Edge endpoint contract (to be implemented server-side):
       POST {edge_url}/v1/anchors/redeem
       Body:    {"code": "...", "hardware_fingerprint": "..."}
-      200 OK   {"cert": "...", "key": "...", "ca": "...", "upstream_url": "..."}
+      200 OK   {"cert": "...", "key": "...", "ca": "...",
+                "upstream_url": "...", "upstream_bearer": "mcp_..."}
       4xx     {"error": "expired"|"unknown"|"already_redeemed"|"fingerprint_mismatch"}
     """
     payload = {
@@ -62,4 +65,5 @@ async def redeem(edge_url: str, anchor_code: str,
         key_pem=body["key"],
         ca_pem=body["ca"],
         upstream_url=body["upstream_url"],
+        upstream_bearer=body["upstream_bearer"],
     )

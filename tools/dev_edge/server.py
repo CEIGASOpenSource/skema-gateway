@@ -30,7 +30,7 @@ from aiohttp import web
 from ca import ca_cert_pem, load_or_mint_ca, mint_operator_cert
 
 DEFAULT_CA_DIR       = Path(os.environ.get("DEV_EDGE_CA_DIR",       "/tmp/skema-dev-edge-ca"))
-DEFAULT_UPSTREAM_URL = os.environ.get("DEV_EDGE_UPSTREAM",         "http://127.0.0.1:7879/")
+DEFAULT_UPSTREAM_URL = os.environ.get("DEV_EDGE_UPSTREAM",         "http://127.0.0.1:7879/mcp")
 DEFAULT_LISTEN_HOST  = os.environ.get("DEV_EDGE_HOST",             "127.0.0.1")
 DEFAULT_LISTEN_PORT  = int(os.environ.get("DEV_EDGE_PORT",         "8443"))
 
@@ -55,11 +55,18 @@ async def handle_redeem(request: web.Request) -> web.Response:
         hardware_fingerprint=fp,
     )
 
+    # Dev-only: synthesize a bearer. In production the bearer is issued
+    # atomically when the anchor row transitions to `redeemed`; its sha256
+    # lands in parallax.mcp_client_tokens.token_hash.
+    import secrets as _secrets
+    bearer = "mcp_dev_" + _secrets.token_urlsafe(24)
+
     return web.json_response({
-        "cert":         bundle.cert,
-        "key":          bundle.key,
-        "ca":           ca_cert_pem(state["ca_cert"]),
-        "upstream_url": state["upstream_url"],
+        "cert":            bundle.cert,
+        "key":             bundle.key,
+        "ca":              ca_cert_pem(state["ca_cert"]),
+        "upstream_url":    state["upstream_url"],
+        "upstream_bearer": bearer,
     })
 
 

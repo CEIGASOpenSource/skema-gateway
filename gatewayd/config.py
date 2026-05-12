@@ -27,12 +27,13 @@ class MCPConfig:
 
 @dataclass
 class UpstreamConfig:
-    """How to reach the user's hosted skema container."""
-    url:        str = "https://skema.example.invalid"
-    ca_path:    str = ""                     # trust anchor for upstream's cert
-    cert_path:  str = ""                     # our client cert
-    key_path:   str = ""                     # our client key
-    timeout_s:  float = 30.0
+    """How to reach the user's hosted skema container's MCP endpoint."""
+    url:           str = "https://skema.example.invalid/mcp"
+    ca_path:       str = ""        # trust anchor for upstream's cert
+    cert_path:     str = ""        # our client cert
+    key_path:      str = ""        # our client key
+    bearer_token:  str = ""        # mcp_<...> token; validated against mcp_client_tokens
+    timeout_s:     float = 30.0
 
 
 @dataclass

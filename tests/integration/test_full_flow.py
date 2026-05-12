@@ -103,21 +103,35 @@ def wait_for_stable(container: str, timeout_s: int = 120):
 # ─── Mock upstream (mTLS) ───────────────────────────────────────────────
 
 async def _mock_upstream_handler(request: web.Request) -> web.Response:
+    """Faithful mock of the production /mcp contract — JSON-RPC 2.0 with
+    initialize / tools/list / tools/call(shape|recall|signal)."""
+    import json as _json
     body = await request.json()
     method = body.get("method")
-    params = body.get("params", {})
-    if method == "shape":
-        return web.json_response({
-            "jsonrpc": "2.0", "id": body.get("id", 1),
-            "result": {
-                "text": f"echo: {params.get('prompt', '')}",
+    params = body.get("params") or {}
+    rid = body.get("id", 1)
+    if method == "initialize":
+        return web.json_response({"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "synaptive-mock", "version": "0.0.1"},
+        }})
+    if method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        if name == "shape":
+            text_body = _json.dumps({
+                "directive": f"echo-shape: {args.get('message','')}",
                 "ceigas_crossing_id": str(uuid.uuid4()),
-            },
-        })
-    return web.json_response({
-        "jsonrpc": "2.0", "id": body.get("id", 1),
-        "error": {"code": -32601, "message": f"unknown method {method}"},
-    })
+            })
+            return web.json_response({"jsonrpc": "2.0", "id": rid, "result": {
+                "content": [{"type": "text", "text": text_body}],
+                "isError": False,
+            }})
+        return web.json_response({"jsonrpc": "2.0", "id": rid,
+            "error": {"code": -32601, "message": f"unknown tool {name}"}})
+    return web.json_response({"jsonrpc": "2.0", "id": rid,
+        "error": {"code": -32601, "message": f"unknown method {method}"}})
 
 
 def _build_server_ssl_ctx(server_cert_pem: str, server_key_pem: str,
@@ -156,7 +170,7 @@ async def run() -> None:
                                        common_name="127.0.0.1",
                                        san_hosts=["127.0.0.1"])
     upstream_app = web.Application()
-    upstream_app.router.add_post("/", _mock_upstream_handler)
+    upstream_app.router.add_post("/mcp", _mock_upstream_handler)
     upstream_runner = web.AppRunner(upstream_app)
     await upstream_runner.setup()
     upstream_ssl = _build_server_ssl_ctx(server_bundle.cert, server_bundle.key,
@@ -164,7 +178,7 @@ async def run() -> None:
     upstream_site = web.TCPSite(upstream_runner, "127.0.0.1", 0, ssl_context=upstream_ssl)
     await upstream_site.start()
     upstream_port = upstream_site._server.sockets[0].getsockname()[1]
-    upstream_url = f"https://127.0.0.1:{upstream_port}/"
+    upstream_url = f"https://127.0.0.1:{upstream_port}/mcp"
     check(f"mock upstream listening (mTLS) on {upstream_url}", True)
 
     # ── 3. dev-edge (configured to return our mock upstream URL)
@@ -231,17 +245,23 @@ async def run() -> None:
     check(f"gatewayd listening on 127.0.0.1:{gw_port}", True)
 
     try:
-        # ── 7. operator -> gateway -> mTLS -> mock upstream
+        # ── 7. operator -> gateway -> mTLS -> mock upstream (real MCP envelope)
         async with aiohttp.ClientSession() as sess:
             async with sess.post(
                 f"http://127.0.0.1:{gw_port}/mcp",
-                json={"jsonrpc": "2.0", "method": "shape",
-                       "params": {"prompt": "full flow"}, "id": 1},
+                json={"jsonrpc": "2.0", "id": 1,
+                       "method": "tools/call",
+                       "params": {"name": "shape",
+                                  "arguments": {"message": "full flow"}}},
                 headers={"Authorization": f"Bearer {operator_secret}"},
             ) as r:
                 body = await r.json()
-                ok = r.status == 200 and body.get("result", {}).get("text") == "echo: full flow"
-                check("operator → gateway → mTLS upstream → response", ok,
+                result_block = body.get("result", {})
+                text = (result_block.get("content") or [{}])[0].get("text", "")
+                ok = (r.status == 200
+                      and "echo-shape: full flow" in text
+                      and result_block.get("isError") is False)
+                check("operator → gateway → mTLS upstream → MCP-shaped result", ok,
                       f"status={r.status} body={body}")
 
         # ── 8. audit log chain

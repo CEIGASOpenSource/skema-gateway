@@ -35,6 +35,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+import json
+
 import aiohttp
 import asyncpg
 from aiohttp import web
@@ -84,33 +86,53 @@ def wait_for_stable(container: str, timeout_s: int = 120):
 
 # ─── Mock upstream skema container ─────────────────────────────────────
 
-async def _mock_shape(request: web.Request) -> web.Response:
+async def _mock_mcp(request: web.Request) -> web.Response:
+    """Faithful mock of /opt/privatae/skema/server/routes/mcp.py — JSON-RPC 2.0
+    over /mcp, with `initialize`, `tools/list`, `tools/call(shape|recall|signal)`,
+    and a synthetic-error path. Auth is bearer; any non-empty bearer accepted."""
+    if not request.headers.get("Authorization", "").startswith("Bearer "):
+        return web.json_response({"error": "missing bearer"}, status=401)
+
     body = await request.json()
     method = body.get("method")
-    params = body.get("params", {})
-    if method == "shape":
-        prompt = params.get("prompt", "")
-        return web.json_response({
-            "jsonrpc": "2.0", "id": body.get("id", 1),
-            "result": {
-                "text": f"echo: {prompt}",
+    params = body.get("params") or {}
+    rid = body.get("id", 1)
+
+    if method == "initialize":
+        return web.json_response({"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "synaptive-mock", "version": "0.0.1"},
+        }})
+    if method == "tools/list":
+        return web.json_response({"jsonrpc": "2.0", "id": rid, "result": {
+            "tools": [{"name": "shape"}, {"name": "recall"}, {"name": "signal"}],
+        }})
+    if method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        if name == "shape":
+            msg = args.get("message", "")
+            text_body = json.dumps({
+                "directive": f"echo-shape: {msg}",
                 "ceigas_crossing_id": str(uuid.uuid4()),
-            },
-        })
-    if method == "force_error":
-        return web.json_response({
-            "jsonrpc": "2.0", "id": body.get("id", 1),
-            "error": {"code": -32000, "message": "synthetic error"},
-        })
-    return web.json_response({
-        "jsonrpc": "2.0", "id": body.get("id", 1),
-        "error": {"code": -32601, "message": f"unknown method {method}"},
-    })
+            })
+            return web.json_response({"jsonrpc": "2.0", "id": rid, "result": {
+                "content": [{"type": "text", "text": text_body}],
+                "isError": False,
+            }})
+        if name == "force_error":
+            return web.json_response({"jsonrpc": "2.0", "id": rid,
+                "error": {"code": -32000, "message": "synthetic error"}})
+        return web.json_response({"jsonrpc": "2.0", "id": rid,
+            "error": {"code": -32601, "message": f"unknown tool {name}"}})
+    return web.json_response({"jsonrpc": "2.0", "id": rid,
+        "error": {"code": -32601, "message": f"unknown method {method}"}})
 
 
 def build_mock_upstream() -> web.Application:
     app = web.Application()
-    app.router.add_post("/", _mock_shape)
+    app.router.add_post("/mcp", _mock_mcp)
     return app
 
 
@@ -144,7 +166,8 @@ async def run() -> None:
     cfg = GatewayConfig(
         mcp=MCPConfig(listen_host="127.0.0.1", listen_port=0,
                        operator_secret_env="SKEMA_OPERATOR_SECRET"),
-        upstream=UpstreamConfig(url=f"http://127.0.0.1:{mock_port}/"),
+        upstream=UpstreamConfig(url=f"http://127.0.0.1:{mock_port}/mcp",
+                                  bearer_token="mcp_test_token"),
         backup=BackupConfig(local_dsn=LOCAL_DSN),
         audit=AuditConfig(audit_key_env="SKEMA_AUDIT_HMAC_KEY"),
     )
@@ -177,29 +200,36 @@ async def run() -> None:
                                   headers={"Authorization": "Bearer wrong"}) as r:
                 check("wrong bearer → 401", r.status == 401)
 
-            # ─── successful shape() call
+            # ─── successful shape() tool call (real MCP envelope shape)
             headers = {"Authorization": f"Bearer {operator_secret}",
                        "X-Operator-Id": str(uuid.uuid4()),
                        "X-Entity-Id": "entity-3"}
             async with sess.post(f"{base}/mcp",
-                                  json={"jsonrpc": "2.0", "method": "shape",
-                                         "params": {"prompt": "hello world"}, "id": 42},
+                                  json={"jsonrpc": "2.0", "id": 42,
+                                         "method": "tools/call",
+                                         "params": {"name": "shape",
+                                                    "arguments": {"message": "hello world"}}},
                                   headers=headers) as r:
                 body = await r.json()
                 ok_status = r.status == 200
-                ok_result = body.get("result", {}).get("text") == "echo: hello world"
-                check("shape() succeeded with correct result",
-                      ok_status and ok_result,
+                result_block = body.get("result", {})
+                text = (result_block.get("content") or [{}])[0].get("text", "")
+                ok_result = "echo-shape: hello world" in text
+                check("shape() tool call returns MCP-shaped result",
+                      ok_status and ok_result and result_block.get("isError") is False,
                       f"status={r.status} body={body}")
 
-            # ─── upstream-error propagation
+            # ─── upstream-error propagation (synthetic tool that returns JSON-RPC error)
             async with sess.post(f"{base}/mcp",
-                                  json={"method": "force_error", "id": 7},
+                                  json={"jsonrpc": "2.0", "id": 7,
+                                         "method": "tools/call",
+                                         "params": {"name": "force_error"}},
                                   headers=headers) as r:
                 body = await r.json()
-                err = body.get("error", {})
-                check("upstream error propagated as JSON-RPC error",
-                      r.status == 502 and err.get("code") == -32000)
+                err = body.get("error") or {}
+                check("upstream JSON-RPC error propagated verbatim",
+                      r.status == 200 and err.get("code") == -32000,
+                      f"status={r.status} body={body}")
 
         # ─── audit log: should have 4 rows (2 calls × 2 entries each) plus 1 if force_error logged in-flight
         async with pool.acquire() as conn:

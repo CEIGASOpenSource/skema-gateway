@@ -1,21 +1,25 @@
 """Outbound mTLS client to the user's hosted skema container.
 
 The gateway acts as a TLS *client* with a CA-signed cert obtained via the
-anchor redemption flow. The remote side is the user's container; its cert
-is verified against the provisioning CA.
+anchor redemption flow. Per project_skema_trust_path, mTLS terminates AT
+the container (edge is a pure SNI TCP proxy in production), so the TLS
+session is end-to-end.
 
-Per project_skema_trust_path: the edge (Privatae-FW) is a pure SNI TCP proxy
-in production — TLS terminates AT the container, not at the edge. So this
-client's TLS session is end-to-end with the container.
+The container's MCP server requires both:
+  - mTLS client cert (proves machine identity; matches hardware_fingerprint
+    recorded in `mcp_client_tokens.hardware_fingerprint`)
+  - Bearer token (proves entity binding; SHA-256 hash matches
+    `mcp_client_tokens.token_hash`)
 
-The hardware fingerprint is sent as a header on every request; the container
-side validates it against `mcp_client_tokens.hardware_fingerprint`. A modified
-gateway cannot forge a fingerprint that matches the recorded value.
+Two trust layers, defense in depth.
+
+The gateway is a transparent JSON-RPC 2.0 proxy. It forwards the operator's
+envelope verbatim to the upstream container's `/mcp` endpoint and returns
+the upstream's response envelope verbatim. Audit happens around the call.
 """
 
 from __future__ import annotations
 
-import json
 import ssl
 from typing import Any
 
@@ -33,7 +37,7 @@ def _build_ssl_context(cfg: UpstreamConfig) -> ssl.SSLContext:
 
 
 class UpstreamClient:
-    """Async mTLS client for calling the hosted skema container."""
+    """Async mTLS JSON-RPC client for the user's hosted skema container."""
 
     def __init__(self, cfg: UpstreamConfig):
         self.cfg = cfg
@@ -43,7 +47,7 @@ class UpstreamClient:
         if self.cfg.cert_path and self.cfg.key_path:
             ssl_ctx: ssl.SSLContext | bool = _build_ssl_context(self.cfg)
         else:
-            # Dev/test mode: no client cert. Real installs MUST configure mTLS.
+            # Dev/test: plain HTTP. Real installs MUST configure mTLS.
             ssl_ctx = False
         connector = aiohttp.TCPConnector(ssl=ssl_ctx)
         timeout = aiohttp.ClientTimeout(total=self.cfg.timeout_s)
@@ -55,35 +59,31 @@ class UpstreamClient:
             await self._session.close()
             self._session = None
 
-    async def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Send a JSON-RPC 2.0 request to the upstream container and return its result."""
+    async def forward(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """Forward a JSON-RPC envelope to the upstream `/mcp` endpoint verbatim.
+
+        Returns the upstream's response envelope verbatim. Caller is responsible
+        for stripping operator-side credentials and substituting the upstream
+        bearer before invoking this.
+        """
         if self._session is None:
             raise RuntimeError("UpstreamClient must be used as async context manager")
 
-        payload = {
-            "jsonrpc": "2.0",
-            "id":      1,
-            "method":  method,
-            "params":  params or {},
-        }
         headers = {
-            "Content-Type":               "application/json",
-            "X-Skema-Hardware-Fingerprint": fingerprint(),
+            "Content-Type":                  "application/json",
+            "Authorization":                 f"Bearer {self.cfg.bearer_token}",
+            "X-Skema-Hardware-Fingerprint":  fingerprint(),
         }
 
-        async with self._session.post(
-            self.cfg.url, data=json.dumps(payload), headers=headers
-        ) as resp:
+        async with self._session.post(self.cfg.url, json=envelope, headers=headers) as resp:
+            # JSON-RPC servers SHOULD return 200 even for protocol-level errors;
+            # 4xx/5xx is for HTTP-level failures.
             resp.raise_for_status()
-            body = await resp.json()
-
-        if "error" in body and body["error"] is not None:
-            raise UpstreamError(body["error"])
-        return body.get("result", {})
+            return await resp.json()
 
 
 class UpstreamError(RuntimeError):
-    """The upstream container returned a JSON-RPC error envelope."""
+    """The upstream returned a JSON-RPC error envelope or an HTTP failure."""
     def __init__(self, err: dict[str, Any]):
         super().__init__(f"upstream error {err.get('code')}: {err.get('message')}")
         self.payload = err

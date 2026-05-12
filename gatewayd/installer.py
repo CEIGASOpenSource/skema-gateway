@@ -149,11 +149,12 @@ async def install(args) -> int:
         return 2
     print("[install] redemption ok")
 
-    # ─── 2. Persist cert / key / CA
+    # ─── 2. Persist cert / key / CA + upstream bearer
     (certs / "client.cert.pem").write_text(result.cert_pem)
     (certs / "client.key.pem").write_text(result.key_pem)
     os.chmod(certs / "client.key.pem", 0o600)
     (certs / "ca.cert.pem").write_text(result.ca_pem)
+    _write_secret(home / "secrets" / "upstream.bearer", result.upstream_bearer)
     print(f"[install] wrote cert material to {certs}/")
 
     # ─── 3. Secrets
@@ -193,11 +194,12 @@ async def install(args) -> int:
             "operator_secret_env": "SKEMA_OPERATOR_SECRET",
         },
         "upstream": {
-            "url":       result.upstream_url,
-            "ca_path":   str(certs / "ca.cert.pem"),
-            "cert_path": str(certs / "client.cert.pem"),
-            "key_path":  str(certs / "client.key.pem"),
-            "timeout_s": 30,
+            "url":          result.upstream_url,
+            "ca_path":      str(certs / "ca.cert.pem"),
+            "cert_path":    str(certs / "client.cert.pem"),
+            "key_path":     str(certs / "client.key.pem"),
+            "bearer_token": result.upstream_bearer,
+            "timeout_s":    30,
         },
         "backup": {
             "local_dsn": args.local_dsn,
