@@ -1,0 +1,34 @@
+name: skema-gateway-stack
+
+# Local PostgreSQL for the Skema Gateway daemon. Holds:
+#   - operator_audit_log (HMAC-signed local audit mirror)
+#   - principals, sources, source_chunks, memories, ... (user's world model)
+# All data here is plaintext on disk — the gateway encrypts it on push to
+# the hosted backup table, never persists ciphertext locally.
+#
+# Volume is named `skema-gateway-pgdata` so reinstalling the daemon
+# preserves data unless the user explicitly removes the volume.
+#
+# Port is bound only to 127.0.0.1 — no LAN exposure.
+
+services:
+  postgres:
+    image: timescale/timescaledb-ha:pg16
+    container_name: skema-gateway-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     skema
+      POSTGRES_PASSWORD: skema
+      POSTGRES_DB:       skema_local
+    ports:
+      - "127.0.0.1:54430:5432"
+    volumes:
+      - skema-gateway-pgdata:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skema -d skema_local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  skema-gateway-pgdata:
