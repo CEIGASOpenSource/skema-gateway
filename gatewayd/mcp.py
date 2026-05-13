@@ -167,6 +167,10 @@ async def _handle_mcp(request: web.Request) -> web.Response:
             status=502,
         )
 
+    # Notification path: upstream returned 202/204 with no body. Pass through.
+    if response_envelope is None:
+        return web.Response(status=204)
+
     # ── audit: completed ──
     async with state.local.acquire() as conn:
         await write_entry(conn, state.audit_key, AuditEntry(

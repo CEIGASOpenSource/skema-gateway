@@ -59,10 +59,12 @@ class UpstreamClient:
             await self._session.close()
             self._session = None
 
-    async def forward(self, envelope: dict[str, Any]) -> dict[str, Any]:
+    async def forward(self, envelope: dict[str, Any]) -> dict[str, Any] | None:
         """Forward a JSON-RPC envelope to the upstream `/mcp` endpoint verbatim.
 
-        Returns the upstream's response envelope verbatim. Caller is responsible
+        Returns the upstream's response envelope verbatim, or None if the
+        request was a notification (JSON-RPC msg without `id`) and the
+        upstream responded 202/204 with no body. Caller is responsible
         for stripping operator-side credentials and substituting the upstream
         bearer before invoking this.
         """
@@ -76,6 +78,9 @@ class UpstreamClient:
         }
 
         async with self._session.post(self.cfg.url, json=envelope, headers=headers) as resp:
+            # MCP notifications (no `id` field) get 202/204 from upstream — no body to decode.
+            if resp.status in (202, 204):
+                return None
             # JSON-RPC servers SHOULD return 200 even for protocol-level errors;
             # 4xx/5xx is for HTTP-level failures.
             resp.raise_for_status()
