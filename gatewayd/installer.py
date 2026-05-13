@@ -176,10 +176,15 @@ async def install(args) -> int:
     print("[install] applying local-PG migration ...")
     await _provision_local(args.local_dsn, local_mig)
 
-    print("[install] applying parallax migrations and inserting envelopes ...")
-    await _provision_parallax(args.parallax_dsn,
-                               passphrase, recovery_code.encode(),
-                               dek, parallax_mig, parallax_seed)
+    if args.parallax_dsn:
+        print("[install] applying parallax migrations and inserting envelopes ...")
+        await _provision_parallax(args.parallax_dsn,
+                                   passphrase, recovery_code.encode(),
+                                   dek, parallax_mig, parallax_seed)
+    else:
+        print("[install] skipping parallax envelope provisioning "
+               "(--parallax-dsn not provided; backup envelopes will be set "
+               "up via the daemon on first encrypted backup push).")
 
     # ─── 5. Write gatewayd.toml
     operator_secret = secrets.token_urlsafe(32)
@@ -237,7 +242,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--edge-url",     required=True)
     p.add_argument("--anchor-code",  required=True)
     p.add_argument("--local-dsn",    required=True)
-    p.add_argument("--parallax-dsn", required=True)
+    p.add_argument("--parallax-dsn", default="",
+                    help="optional; only needed when bootstrapping backup envelopes "
+                         "from this installer rather than via the daemon's first push")
     p.add_argument("--home",         help="config home (default: $SKEMA_GATEWAY_HOME or ~/.config/skema)")
     p.add_argument("--passphrase",   help="dev only; prefer --passphrase-from-env or interactive prompt")
     p.add_argument("--passphrase-from-env",
