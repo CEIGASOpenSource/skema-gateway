@@ -86,6 +86,33 @@ class UpstreamClient:
             resp.raise_for_status()
             return await resp.json()
 
+    async def post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any] | None:
+        """POST a JSON body to an arbitrary upstream path on the same mTLS
+        session. Used for sidecar pushes (audit ingest, backup blob sync)
+        that ride the same gateway authentication as the MCP forward path.
+        """
+        if self._session is None:
+            raise RuntimeError("UpstreamClient must be used as async context manager")
+
+        # Build the absolute URL from the configured MCP endpoint's scheme+host.
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(self.cfg.url)
+        target = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+        headers = {
+            "Content-Type":                  "application/json",
+            "Authorization":                 f"Bearer {self.cfg.bearer_token}",
+            "X-Skema-Hardware-Fingerprint":  fingerprint(),
+        }
+        async with self._session.post(target, json=body, headers=headers) as resp:
+            if resp.status in (202, 204):
+                return None
+            resp.raise_for_status()
+            try:
+                return await resp.json()
+            except aiohttp.ContentTypeError:
+                return None
+
 
 class UpstreamError(RuntimeError):
     """The upstream returned a JSON-RPC error envelope or an HTTP failure."""

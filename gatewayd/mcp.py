@@ -24,6 +24,7 @@ Per call:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -142,12 +143,15 @@ async def _handle_mcp(request: web.Request) -> web.Response:
     action_for_audit = _action_for_audit(method, params)
 
     # ── audit: in-flight ──
+    inflight_entry = AuditEntry(
+        operator_id=operator_id, entity_id=entity_id,
+        source_domain="operator", target_domain="skema",
+        action=action_for_audit, params=params,
+    )
     async with state.local.acquire() as conn:
-        await write_entry(conn, state.audit_key, AuditEntry(
-            operator_id=operator_id, entity_id=entity_id,
-            source_domain="operator", target_domain="skema",
-            action=action_for_audit, params=params,
-        ))
+        await write_entry(conn, state.audit_key, inflight_entry)
+    # Forward to container best-effort — local write is authoritative.
+    asyncio.create_task(_forward_audit(state, inflight_entry))
 
     # ── forward verbatim ──
     try:
@@ -172,16 +176,38 @@ async def _handle_mcp(request: web.Request) -> web.Response:
         return web.Response(status=204)
 
     # ── audit: completed ──
+    completed_entry = AuditEntry(
+        operator_id=operator_id, entity_id=entity_id,
+        source_domain="skema", target_domain="operator",
+        action=action_for_audit,
+        result=response_envelope.get("result") if isinstance(response_envelope.get("result"), dict) else {},
+        ceigas_crossing_id=_extract_crossing_id(response_envelope),
+    )
     async with state.local.acquire() as conn:
-        await write_entry(conn, state.audit_key, AuditEntry(
-            operator_id=operator_id, entity_id=entity_id,
-            source_domain="skema", target_domain="operator",
-            action=action_for_audit,
-            result=response_envelope.get("result") if isinstance(response_envelope.get("result"), dict) else {},
-            ceigas_crossing_id=_extract_crossing_id(response_envelope),
-        ))
+        await write_entry(conn, state.audit_key, completed_entry)
+    asyncio.create_task(_forward_audit(state, completed_entry))
 
     return web.json_response(response_envelope)
+
+
+async def _forward_audit(state, entry: "AuditEntry") -> None:
+    """Push a copy of the audit row to the user's hosted container so the
+    in-container Gateway Audit app can render it. Best-effort: local is the
+    authoritative writer. Failures here are logged, not raised."""
+    try:
+        body = {
+            "operator_id":        str(entry.operator_id),
+            "entity_id":          entry.entity_id,
+            "source_domain":      entry.source_domain,
+            "target_domain":      entry.target_domain,
+            "action":             entry.action,
+            "params":             entry.params,
+            "result":             entry.result,
+            "ceigas_crossing_id": str(entry.ceigas_crossing_id) if entry.ceigas_crossing_id else None,
+        }
+        await state.upstream.post_json("/api/audit/ingest", body)
+    except Exception as e:
+        logger.debug("audit forward failed (non-fatal): %s", e)
 
 
 async def _handle_health(request: web.Request) -> web.Response:
@@ -194,4 +220,12 @@ def build_app(cfg: GatewayConfig, local: asyncpg.Pool,
     app["state"] = _State(cfg, local, upstream)
     app.router.add_post("/mcp", _handle_mcp)
     app.router.add_get("/health", _handle_health)
+
+    # Localhost dashboard — mounts /, /dashboard/* (static), and
+    # /api/gateway/* (status, audit, operators, anchors, backup ceremony).
+    # Binds to the same listen_host as /mcp, which the config pins to
+    # 127.0.0.1 — the dashboard is never reachable from off-machine.
+    from gatewayd.dashboard.routes import register_routes
+    register_routes(app)
+
     return app
