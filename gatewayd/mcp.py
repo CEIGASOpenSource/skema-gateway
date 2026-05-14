@@ -220,4 +220,12 @@ def build_app(cfg: GatewayConfig, local: asyncpg.Pool,
     app["state"] = _State(cfg, local, upstream)
     app.router.add_post("/mcp", _handle_mcp)
     app.router.add_get("/health", _handle_health)
+
+    # Localhost dashboard — mounts /, /dashboard/* (static), and
+    # /api/gateway/* (status, audit, operators, anchors, backup ceremony).
+    # Binds to the same listen_host as /mcp, which the config pins to
+    # 127.0.0.1 — the dashboard is never reachable from off-machine.
+    from gatewayd.dashboard.routes import register_routes
+    register_routes(app)
+
     return app

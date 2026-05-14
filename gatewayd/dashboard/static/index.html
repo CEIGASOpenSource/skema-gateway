@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>skema gateway</title>
+    <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span class="brand-mark">⌥</span>
+            <span class="brand-name">skema gateway</span>
+        </div>
+        <nav class="topnav">
+            <a href="#status" class="navlink active" data-target="view-status">Status</a>
+            <a href="#audit" class="navlink" data-target="view-audit">Audit</a>
+            <a href="#operators" class="navlink" data-target="view-operators">Operators</a>
+            <a href="#backup" class="navlink" data-target="view-backup">Backup</a>
+            <a href="#anchors" class="navlink" data-target="view-anchors">Anchors</a>
+        </nav>
+        <div class="topright">
+            <span class="label" id="topright-version">—</span>
+        </div>
+    </header>
+
+    <main class="content">
+
+        <!-- ── STATUS ─────────────────────────────────────── -->
+        <section id="view-status" class="view active">
+            <h1 class="view-title">Status</h1>
+            <p class="view-sub">What this gateway is bonded to, and whether the link is up.</p>
+
+            <div class="cards">
+                <div class="card">
+                    <div class="card-label">Upstream</div>
+                    <div class="card-value" id="status-upstream">—</div>
+                    <div class="card-meta" id="status-upstream-meta">—</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">Cert fingerprint</div>
+                    <div class="card-value mono" id="status-fingerprint">—</div>
+                    <div class="card-meta" id="status-bonded-at">—</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">Local listen</div>
+                    <div class="card-value mono" id="status-listen">—</div>
+                    <div class="card-meta">MCP relay + this dashboard</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">Upstream reachable</div>
+                    <div class="card-value" id="status-reachable">—</div>
+                    <div class="card-meta" id="status-reachable-meta">—</div>
+                </div>
+            </div>
+
+            <h2 class="section-title">Health checks</h2>
+            <div id="health-list" class="stack">
+                <div class="empty">Loading…</div>
+            </div>
+        </section>
+
+        <!-- ── AUDIT ─────────────────────────────────────── -->
+        <section id="view-audit" class="view">
+            <h1 class="view-title">Local audit log</h1>
+            <p class="view-sub">Every gateway-authorized action gets two HMAC-signed rows here. Tampering anywhere breaks the chain.</p>
+
+            <div class="audit-toolbar">
+                <button id="btn-verify-chain" class="btn">Verify chain integrity</button>
+                <span id="verify-result" class="label"></span>
+            </div>
+
+            <div id="audit-list" class="stack">
+                <div class="empty">Loading…</div>
+            </div>
+            <div class="audit-pager">
+                <button id="btn-audit-more" class="btn ghost" hidden>Load more</button>
+            </div>
+        </section>
+
+        <!-- ── OPERATORS ─────────────────────────────────── -->
+        <section id="view-operators" class="view">
+            <h1 class="view-title">Connected operators</h1>
+            <p class="view-sub">Clients that have hit this gateway's <code>/mcp</code> endpoint recently. Identity comes from the <code>X-Operator-Id</code> header.</p>
+
+            <div id="operators-list" class="stack">
+                <div class="empty">Loading…</div>
+            </div>
+        </section>
+
+        <!-- ── BACKUP ────────────────────────────────────── -->
+        <section id="view-backup" class="view">
+            <h1 class="view-title">Encrypted backup</h1>
+            <p class="view-sub">Your synaptive memory, encrypted on this machine before any bytes leave. Only you hold the passphrase.</p>
+
+            <div class="card backup-card">
+                <div class="backup-state" id="backup-state-pills">
+                    <span class="pill" id="pill-passphrase">passphrase: —</span>
+                    <span class="pill" id="pill-recovery">recovery code: —</span>
+                    <span class="pill" id="pill-lastsync">last sync: —</span>
+                </div>
+                <div class="backup-stats" id="backup-stats">—</div>
+            </div>
+
+            <div id="backup-setup-block" class="setup-block" hidden>
+                <h2 class="section-title">Set passphrase</h2>
+                <p class="view-sub">One-time setup. After this, your memory rows encrypt on-device with a key derived from this passphrase via argon2id. We will also generate a recovery code &mdash; print it once and store it offline. Losing both = your encrypted backup is unrecoverable.</p>
+                <div class="form-row">
+                    <input type="password" id="input-passphrase" placeholder="passphrase" autocomplete="new-password">
+                    <input type="password" id="input-passphrase-confirm" placeholder="confirm passphrase" autocomplete="new-password">
+                </div>
+                <button id="btn-set-passphrase" class="btn primary">Generate keys + start backup</button>
+                <div id="recovery-display" class="recovery" hidden>
+                    <div class="recovery-title">Recovery code (shown once)</div>
+                    <pre id="recovery-code" class="recovery-code"></pre>
+                    <p class="recovery-sub">Write this down. Store it offline. If you forget the passphrase, this code is the only way back.</p>
+                    <button id="btn-recovery-confirmed" class="btn">I've saved it</button>
+                </div>
+            </div>
+
+            <div id="backup-configured-block" class="setup-block" hidden>
+                <h2 class="section-title">Sync</h2>
+                <p class="view-sub">Push a fresh ciphertext snapshot of every backed-up row to your container's <code>local_backup_blob</code>.</p>
+                <button id="btn-sync-now" class="btn">Sync now</button>
+                <span id="sync-status" class="label"></span>
+            </div>
+        </section>
+
+        <!-- ── ANCHORS ───────────────────────────────────── -->
+        <section id="view-anchors" class="view">
+            <h1 class="view-title">Anchor redemption history</h1>
+            <p class="view-sub">Anchor codes you've redeemed to bond this machine to a skema container. Bonded anchors are permanent until revoked.</p>
+
+            <div id="anchors-list" class="stack">
+                <div class="empty">Loading…</div>
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="footbar">
+        <span class="label" id="footer-refreshed">—</span>
+        <span class="label right" id="footer-info">gateway runs on localhost only · MIT licensed · <a href="https://github.com/CEIGASOpenSource/skema-gateway" target="_blank">source</a></span>
+    </footer>
+
+    <script src="/dashboard/app.js"></script>
+</body>
+</html>
