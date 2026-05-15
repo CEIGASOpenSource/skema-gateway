@@ -423,6 +423,79 @@ async def backup_sync_now_handler(request: web.Request) -> web.Response:
     })
 
 
+# ── Tiles (multi-container picker) ─────────────────────────────────
+
+
+async def tiles_containers_handler(request: web.Request) -> web.Response:
+    """Return the list of registered container tiles.
+
+    Each entry: {name, display_name, kind, url, active, has_wallpaper}
+    The dashboard renders one tile per entry, fetches the wallpaper via
+    /api/gateway/tiles/wallpaper/<name>, and POSTs to /api/gateway/select
+    when the user clicks.
+    """
+    from gatewayd.wallpaper import find_cached
+    state = _state(request)
+    registry = state.registry
+    active = registry.active
+    out = []
+    for name, cfg in registry.configs().items():
+        out.append({
+            "name": name,
+            "display_name": cfg.display_name or name,
+            "kind": cfg.kind,
+            "url": cfg.url,
+            "icon_slug": cfg.icon_slug,
+            "active": (name == active),
+            "has_wallpaper": find_cached(name) is not None,
+        })
+    return web.json_response({"tiles": out, "active": active})
+
+
+async def tiles_wallpaper_handler(request: web.Request) -> web.Response:
+    """Serve the cached wallpaper for an upstream. Same-origin so the
+    browser's <img> tag works without CORS dance.
+
+    Filename whitelist mirrors what we built on the skema-security side
+    (alnum + ._-, no path traversal). The wallpaper cache directory is
+    the only filesystem touch.
+    """
+    from gatewayd.wallpaper import find_cached
+    name = request.match_info["name"]
+    import re as _re
+    if name in (".", "..") or not _re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        return web.json_response({"error": "bad_name"}, status=400)
+    path = find_cached(name)
+    if path is None:
+        return web.json_response({"error": "not_cached"}, status=404)
+    ct = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".webp": "image/webp", ".gif": "image/gif",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return web.FileResponse(path=str(path), headers={
+        "Content-Type": ct,
+        "Cache-Control": "private, max-age=3600",
+    })
+
+
+async def tiles_select_handler(request: web.Request) -> web.Response:
+    """Flip the active container tile. JSON body: {"name": "..."}"""
+    state = _state(request)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return web.json_response({"error": "missing_name"}, status=400)
+    try:
+        state.registry.select(name)
+    except KeyError:
+        return web.json_response({"error": "unknown_upstream", "name": name}, status=404)
+    log.info("active upstream selected: %s", name)
+    return web.json_response({"active": state.registry.active})
+
+
 # ── Static + boot ──────────────────────────────────────────────────
 
 
@@ -448,3 +521,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get(f"{api}/backup/state",         backup_state_handler)
     app.router.add_post(f"{api}/backup/set-passphrase", backup_set_passphrase_handler)
     app.router.add_post(f"{api}/backup/sync-now",     backup_sync_now_handler)
+
+    # Multi-container tile grid (Containers section of the dashboard)
+    app.router.add_get(f"{api}/tiles/containers",        tiles_containers_handler)
+    app.router.add_get(f"{api}/tiles/wallpaper/{{name}}", tiles_wallpaper_handler)
+    app.router.add_post(f"{api}/select",                  tiles_select_handler)

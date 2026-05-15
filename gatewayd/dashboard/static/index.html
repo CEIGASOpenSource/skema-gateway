@@ -13,7 +13,8 @@
             <span class="brand-name">skema gateway</span>
         </div>
         <nav class="topnav">
-            <a href="#status" class="navlink active" data-target="view-status">Status</a>
+            <a href="#containers" class="navlink active" data-target="view-containers">Containers</a>
+            <a href="#status" class="navlink" data-target="view-status">Status</a>
             <a href="#audit" class="navlink" data-target="view-audit">Audit</a>
             <a href="#operators" class="navlink" data-target="view-operators">Operators</a>
             <a href="#backup" class="navlink" data-target="view-backup">Backup</a>
@@ -26,8 +27,22 @@
 
     <main class="content">
 
+        <!-- ── CONTAINERS (tile grid) ─────────────────────── -->
+        <section id="view-containers" class="view active">
+            <h1 class="view-title">Containers</h1>
+            <p class="view-sub">Pick a container to route MCP traffic to. The active tile is highlighted.</p>
+
+            <div id="tile-grid" class="tile-grid">
+                <!-- tiles injected by JS -->
+            </div>
+
+            <p class="view-sub" id="tile-grid-empty" style="display:none;">
+                No containers registered. Add <code>[upstreams.NAME]</code> entries to your <code>gatewayd.toml</code> and restart the daemon.
+            </p>
+        </section>
+
         <!-- ── STATUS ─────────────────────────────────────── -->
-        <section id="view-status" class="view active">
+        <section id="view-status" class="view">
             <h1 class="view-title">Status</h1>
             <p class="view-sub">What this gateway is bonded to, and whether the link is up.</p>
 

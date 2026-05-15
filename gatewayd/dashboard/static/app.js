@@ -52,12 +52,13 @@
     }
 
     function fromHash() {
-        const h = (location.hash || '#status').slice(1);
+        const h = (location.hash || '#containers').slice(1);
         const map = {
+            containers: 'view-containers',
             status: 'view-status', audit: 'view-audit', operators: 'view-operators',
             backup: 'view-backup', anchors: 'view-anchors',
         };
-        return map[h] || 'view-status';
+        return map[h] || 'view-containers';
     }
 
     window.addEventListener('hashchange', () => activate(fromHash()));
@@ -273,8 +274,79 @@
         }
     }
 
+    // ── CONTAINERS (tile grid) ────────────────────────
+    async function loadContainers() {
+        const grid = $('tile-grid');
+        const emptyMsg = $('tile-grid-empty');
+        if (!grid) return;
+        try {
+            const data = await fetchJSON('/api/gateway/tiles/containers');
+            const tiles = data.tiles || [];
+            if (tiles.length === 0) {
+                grid.innerHTML = '';
+                if (emptyMsg) emptyMsg.style.display = '';
+                return;
+            }
+            if (emptyMsg) emptyMsg.style.display = 'none';
+            grid.innerHTML = tiles.map(t => renderTile(t)).join('');
+            grid.querySelectorAll('.tile').forEach(el => {
+                el.addEventListener('click', e => {
+                    if (e.target.closest('.tile-action')) return;  // ignore action button clicks here
+                    selectTile(el.dataset.name);
+                });
+            });
+            grid.querySelectorAll('.tile-action[data-action="open"]').forEach(btn => {
+                btn.addEventListener('click', e => {
+                    e.stopPropagation();
+                    const url = btn.dataset.url;
+                    if (url) window.open(url, '_blank', 'noopener,noreferrer');
+                });
+            });
+        } catch (err) {
+            console.error('containers', err);
+            grid.innerHTML = '<p class="view-sub">Failed to load containers: ' + esc(String(err)) + '</p>';
+        }
+    }
+
+    function renderTile(t) {
+        const bg = t.has_wallpaper
+            ? `background-image: url('/api/gateway/tiles/wallpaper/${encodeURIComponent(t.name)}')`
+            : '';
+        const klass = ['tile'];
+        if (t.active) klass.push('active');
+        if (!t.has_wallpaper) klass.push('tile-fallback');
+        const kindLabel = t.kind === 'service_container' ? 'Service' : 'Entity';
+        return `
+            <div class="${klass.join(' ')}" data-name="${esc(t.name)}" style="${bg}" title="Click to make active">
+                ${t.active ? '<div class="tile-active-badge">Active</div>' : ''}
+                <div class="tile-actions">
+                    <button class="tile-action" data-action="open" data-url="${esc(t.url)}">Open ↗</button>
+                </div>
+                <div class="tile-overlay">
+                    <div class="tile-name">${esc(t.display_name)}</div>
+                    <div class="tile-kind">${kindLabel}</div>
+                </div>
+            </div>
+        `;
+    }
+
+    async function selectTile(name) {
+        try {
+            await fetchJSON('/api/gateway/select', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name }),
+            });
+            loadContainers();   // re-render to update active badge
+            loadStatus();       // status view shows active upstream — refresh
+        } catch (err) {
+            console.error('select', err);
+        }
+    }
+
     // ── Boot ──────────────────────────────────────────
     function refreshAll() {
+        loadContainers();
         loadStatus();
         loadAudit(true);
         loadOperators();
