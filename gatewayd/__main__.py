@@ -28,6 +28,23 @@ async def _run() -> None:
                                      min_size=1, max_size=4)
 
     async with UpstreamRegistry(cfg.upstreams, default_name=cfg.default_upstream) as registry:
+        # Restore last-active selection if persisted.
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT value FROM provisioning WHERE key = $1", "active_upstream",
+                )
+            if row:
+                import json as _json
+                v = row["value"]
+                persisted = _json.loads(v) if isinstance(v, str) else v
+                name = (persisted or {}).get("name") if isinstance(persisted, dict) else None
+                if name and name in registry.names():
+                    registry.select(name)
+                    log.info("restored active upstream from provisioning: %s", name)
+        except Exception as e:
+            log.warning("failed to read persisted active_upstream: %s", e)
+
         app = build_app(cfg, pool, registry)
         runner = web.AppRunner(app)
         await runner.setup()

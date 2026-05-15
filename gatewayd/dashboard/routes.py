@@ -267,36 +267,62 @@ async def audit_verify_handler(request: web.Request) -> web.Response:
 
 
 async def operators_handler(request: web.Request) -> web.Response:
+    """Operator tiles enriched with display_name + icon_slug.
+
+    Auto-seeds a placeholder profile for any operator_id seen in the audit
+    log without one — first sight gets 'operator-<8 hex>' and no icon.
+    User renames via PATCH /operators/<id>.
+    """
     state = _state(request)
     async with state.local.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT operator_id::TEXT AS operator_id,
-                   COUNT(*)::BIGINT AS call_count,
-                   MAX(occurred_at) AS last_seen,
-                   (
-                     SELECT string_agg(action || '(' || cnt || ')', ', ')
-                       FROM (
-                         SELECT action, COUNT(*)::BIGINT AS cnt
-                           FROM operator_audit_log a2
-                          WHERE a2.operator_id = a.operator_id
-                          GROUP BY action
-                          ORDER BY cnt DESC
-                          LIMIT 3
-                       ) top3
-                   ) AS actions_top
-              FROM operator_audit_log a
-             WHERE source_domain = 'operator'
-             GROUP BY operator_id
-             ORDER BY MAX(occurred_at) DESC
-             LIMIT 25
-            """
-        )
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO operator_profiles (operator_id, display_name)
+                SELECT DISTINCT a.operator_id,
+                       'operator-' || substr(a.operator_id::text, 1, 8)
+                  FROM operator_audit_log a
+                 LEFT JOIN operator_profiles p ON p.operator_id = a.operator_id
+                 WHERE a.source_domain = 'operator' AND p.operator_id IS NULL
+                ON CONFLICT (operator_id) DO NOTHING
+                """
+            )
+
+            rows = await conn.fetch(
+                """
+                SELECT a.operator_id::TEXT AS operator_id,
+                       p.display_name,
+                       p.icon_slug,
+                       p.kind,
+                       COUNT(*)::BIGINT AS call_count,
+                       MAX(a.occurred_at) AS last_seen,
+                       (
+                         SELECT string_agg(action || '(' || cnt || ')', ', ')
+                           FROM (
+                             SELECT action, COUNT(*)::BIGINT AS cnt
+                               FROM operator_audit_log a2
+                              WHERE a2.operator_id = a.operator_id
+                              GROUP BY action
+                              ORDER BY cnt DESC
+                              LIMIT 3
+                           ) top3
+                       ) AS actions_top
+                  FROM operator_audit_log a
+                  LEFT JOIN operator_profiles p ON p.operator_id = a.operator_id
+                 WHERE a.source_domain = 'operator'
+                 GROUP BY a.operator_id, p.display_name, p.icon_slug, p.kind
+                 ORDER BY MAX(a.occurred_at) DESC
+                 LIMIT 50
+                """
+            )
 
     return web.json_response({
         "operators": [
             {
                 "operator_id":  r["operator_id"],
+                "display_name": r["display_name"] or ("operator-" + r["operator_id"][:8]),
+                "icon_slug":    r["icon_slug"],
+                "kind":         r["kind"],
                 "call_count":   int(r["call_count"]),
                 "last_seen":    r["last_seen"].isoformat() if r["last_seen"] else None,
                 "actions_top":  r["actions_top"] or "",
@@ -305,6 +331,91 @@ async def operators_handler(request: web.Request) -> web.Response:
         ],
         "listen_port": state.cfg.mcp.listen_port,
     })
+
+
+async def operator_activity_handler(request: web.Request) -> web.Response:
+    """Human-readable activity feed for one operator. Last 100 calls."""
+    state = _state(request)
+    op_id = request.match_info["operator_id"]
+    import re as _re
+    if not _re.fullmatch(r"[0-9a-fA-F-]{36}", op_id):
+        return web.json_response({"error": "bad_operator_id"}, status=400)
+
+    async with state.local.acquire() as conn:
+        profile = await conn.fetchrow(
+            "SELECT display_name, icon_slug, kind, notes "
+            "FROM operator_profiles WHERE operator_id = $1::uuid",
+            op_id,
+        )
+        rows = await conn.fetch(
+            """
+            SELECT log_id, occurred_at, action,
+                   source_domain, target_domain,
+                   entity_id, outcome, latency_ms, error_summary
+            FROM operator_audit_log
+            WHERE operator_id = $1::uuid AND source_domain = 'operator'
+            ORDER BY occurred_at DESC
+            LIMIT 100
+            """,
+            op_id,
+        )
+
+    return web.json_response({
+        "operator_id": op_id,
+        "profile": dict(profile) if profile else None,
+        "activity": [
+            {
+                "log_id":         str(r["log_id"]),
+                "occurred_at":    r["occurred_at"].isoformat() if r["occurred_at"] else None,
+                "action":         r["action"],
+                "target_domain":  r["target_domain"],
+                "entity_id":      r["entity_id"],
+                "outcome":        r["outcome"],
+                "latency_ms":     r["latency_ms"],
+                "error_summary":  r["error_summary"],
+            }
+            for r in rows
+        ],
+    })
+
+
+async def operator_rename_handler(request: web.Request) -> web.Response:
+    """PATCH /operators/<id> — update display_name and/or icon_slug.
+    Body: {"display_name": "...", "icon_slug": "claude-code"} (both optional)."""
+    state = _state(request)
+    op_id = request.match_info["operator_id"]
+    import re as _re
+    if not _re.fullmatch(r"[0-9a-fA-F-]{36}", op_id):
+        return web.json_response({"error": "bad_operator_id"}, status=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+
+    fields: dict[str, str | None] = {}
+    if "display_name" in body and isinstance(body["display_name"], str) and body["display_name"].strip():
+        fields["display_name"] = body["display_name"].strip()
+    if "icon_slug" in body:
+        v = body["icon_slug"]
+        if v in (None, ""):
+            fields["icon_slug"] = None
+        elif isinstance(v, str) and _re.fullmatch(r"[a-z][a-z0-9_\-]{0,31}", v):
+            fields["icon_slug"] = v
+        else:
+            return web.json_response({"error": "bad_icon_slug"}, status=400)
+    if not fields:
+        return web.json_response({"error": "no_fields"}, status=400)
+
+    set_clauses = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(fields.keys()))
+    set_clauses += ", updated_at = NOW()"
+    args: list = [op_id, *fields.values()]
+
+    async with state.local.acquire() as conn:
+        await conn.execute(
+            f"UPDATE operator_profiles SET {set_clauses} WHERE operator_id = $1::uuid",
+            *args,
+        )
+    return web.json_response({"updated": list(fields.keys())})
 
 
 # ── Anchors ────────────────────────────────────────────────────────
@@ -479,7 +590,11 @@ async def tiles_wallpaper_handler(request: web.Request) -> web.Response:
 
 
 async def tiles_select_handler(request: web.Request) -> web.Response:
-    """Flip the active container tile. JSON body: {"name": "..."}"""
+    """Flip the active container tile. JSON body: {"name": "..."}.
+
+    Persists the choice in `provisioning.active_upstream` so the daemon
+    boots into the same tile next time.
+    """
     state = _state(request)
     try:
         body = await request.json()
@@ -492,7 +607,11 @@ async def tiles_select_handler(request: web.Request) -> web.Response:
         state.registry.select(name)
     except KeyError:
         return web.json_response({"error": "unknown_upstream", "name": name}, status=404)
-    log.info("active upstream selected: %s", name)
+    try:
+        await _provisioning_set(state.local, "active_upstream", {"name": name})
+    except Exception as e:
+        log.warning("failed to persist active_upstream: %s", e)
+    log.info("active upstream selected: %s (persisted)", name)
     return web.json_response({"active": state.registry.active})
 
 
@@ -526,3 +645,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get(f"{api}/tiles/containers",        tiles_containers_handler)
     app.router.add_get(f"{api}/tiles/wallpaper/{{name}}", tiles_wallpaper_handler)
     app.router.add_post(f"{api}/select",                  tiles_select_handler)
+
+    # Operators — per-operator activity log + rename/icon
+    app.router.add_get (f"{api}/operators/{{operator_id}}/activity", operator_activity_handler)
+    app.router.add_patch(f"{api}/operators/{{operator_id}}",          operator_rename_handler)

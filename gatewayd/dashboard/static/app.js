@@ -165,26 +165,104 @@
         }
     }
 
-    // ── OPERATORS ─────────────────────────────────────
+    // ── OPERATORS (tile grid + detail) ────────────────
+    const ICON_GLYPH = {
+        'claude-code': 'CC',
+        'codex':       'CX',
+        'openclaw':    'OC',
+        'hermes':      'H',
+        'generic':     '?',
+    };
+
     async function loadOperators() {
         try {
             const data = await fetchJSON('/api/gateway/operators');
-            const list = $('operators-list');
+            const grid = $('operators-grid');
             const ops = data.operators || [];
             if (ops.length === 0) {
-                list.innerHTML = '<div class="empty">No operators have connected yet. Point a client at <code>http://localhost:' + (data.listen_port || '7878') + '/mcp</code> with an <code>X-Operator-Id</code> header to see entries here.</div>';
+                grid.innerHTML = '<div class="empty">No operators have connected yet. Point a client at <code>http://localhost:' + (data.listen_port || '7878') + '/mcp</code> with an <code>X-Operator-Id</code> header to see entries here.</div>';
                 return;
             }
-            list.innerHTML = ops.map(o => `
-                <div class="row">
-                  <div class="row-main">
-                    <div class="row-title mono">${esc(o.operator_id)}</div>
-                    <div class="row-sub">${esc(o.call_count)} calls · last seen ${esc(relTime(o.last_seen))}</div>
-                  </div>
-                  <div class="row-aside">${esc(o.actions_top || '')}</div>
-                </div>`).join('');
+            grid.innerHTML = ops.map(o => renderOperatorTile(o)).join('');
+            grid.querySelectorAll('.operator-tile').forEach(el => {
+                el.addEventListener('click', () => openOperatorDetail(el.dataset.id, el.dataset.name, el.dataset.icon || ''));
+            });
         } catch (err) {
             console.error('operators', err);
+        }
+    }
+
+    function renderOperatorTile(o) {
+        const slug = o.icon_slug || 'generic';
+        const glyph = ICON_GLYPH[slug] || '?';
+        return `
+            <div class="operator-tile" data-id="${esc(o.operator_id)}" data-name="${esc(o.display_name)}" data-icon="${esc(slug)}">
+                <div class="operator-icon" data-icon="${esc(slug)}">${esc(glyph)}</div>
+                <div class="operator-body">
+                    <div class="operator-name">${esc(o.display_name)}</div>
+                    <div class="operator-meta">${o.call_count} calls · last seen ${esc(relTime(o.last_seen))}</div>
+                </div>
+            </div>
+        `;
+    }
+
+    async function openOperatorDetail(opId, name, slug) {
+        const grid = $('operators-grid');
+        const panel = $('operator-detail');
+        grid.style.display = 'none';
+        panel.hidden = false;
+        $('operator-detail-title').textContent = name;
+        $('operator-detail-name').value = name;
+        $('operator-detail-icon').value = slug || '';
+        const feed = $('operator-detail-feed');
+        feed.innerHTML = '<div class="empty">Loading…</div>';
+        panel.dataset.operatorId = opId;
+        try {
+            const data = await fetchJSON('/api/gateway/operators/' + encodeURIComponent(opId) + '/activity');
+            const events = data.activity || [];
+            if (events.length === 0) {
+                feed.innerHTML = '<div class="empty">No activity recorded for this operator.</div>';
+                return;
+            }
+            feed.innerHTML = events.map(e => `
+                <div class="operator-event outcome-${esc(e.outcome || 'ok')}">
+                    <div class="operator-event-time">${esc(relTime(e.occurred_at))}</div>
+                    <div>
+                        <div class="operator-event-action">${esc(e.action || '')}</div>
+                        <div class="operator-event-meta">→ ${esc(e.target_domain || '?')}${e.entity_id ? ' · entity ' + esc(String(e.entity_id)) : ''}${e.latency_ms != null ? ' · ' + esc(String(e.latency_ms)) + 'ms' : ''}${e.error_summary ? ' · ' + esc(e.error_summary) : ''}</div>
+                    </div>
+                    <div class="operator-event-meta">${esc(e.outcome || 'ok')}</div>
+                </div>
+            `).join('');
+        } catch (err) {
+            console.error('operator activity', err);
+            feed.innerHTML = '<div class="empty">Failed to load activity.</div>';
+        }
+    }
+
+    function closeOperatorDetail() {
+        $('operators-grid').style.display = '';
+        $('operator-detail').hidden = true;
+        loadOperators();  // re-render in case rename happened
+    }
+
+    async function saveOperatorProfile() {
+        const panel = $('operator-detail');
+        const opId = panel.dataset.operatorId;
+        if (!opId) return;
+        const body = {
+            display_name: $('operator-detail-name').value.trim(),
+            icon_slug:    $('operator-detail-icon').value || null,
+        };
+        try {
+            await fetchJSON('/api/gateway/operators/' + encodeURIComponent(opId), {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            closeOperatorDetail();
+        } catch (err) {
+            console.error('operator save', err);
         }
     }
 
@@ -359,6 +437,10 @@
         activate(fromHash());
 
         $('btn-verify-chain').addEventListener('click', verifyChain);
+        const opBack = $('operator-detail-back');
+        if (opBack) opBack.addEventListener('click', closeOperatorDetail);
+        const opSave = $('operator-detail-save');
+        if (opSave) opSave.addEventListener('click', saveOperatorProfile);
         $('btn-audit-more').addEventListener('click', () => loadAudit(false));
         $('btn-set-passphrase').addEventListener('click', setPassphrase);
         $('btn-recovery-confirmed').addEventListener('click', () => {

@@ -95,11 +95,34 @@
 
         <!-- ── OPERATORS ─────────────────────────────────── -->
         <section id="view-operators" class="view">
-            <h1 class="view-title">Connected operators</h1>
-            <p class="view-sub">Clients that have hit this gateway's <code>/mcp</code> endpoint recently. Identity comes from the <code>X-Operator-Id</code> header.</p>
+            <h1 class="view-title">Operators</h1>
+            <p class="view-sub">Clients that connect through this gateway. Click a tile to see its activity log.</p>
 
-            <div id="operators-list" class="stack">
+            <div id="operators-grid" class="operator-grid">
                 <div class="empty">Loading…</div>
+            </div>
+
+            <!-- Detail panel — populated when an operator tile is clicked. -->
+            <div id="operator-detail" class="operator-detail" hidden>
+                <header class="operator-detail-head">
+                    <button class="btn-secondary" id="operator-detail-back">← Back</button>
+                    <h2 id="operator-detail-title">—</h2>
+                    <div class="operator-detail-controls">
+                        <input type="text" id="operator-detail-name" placeholder="Display name" />
+                        <select id="operator-detail-icon">
+                            <option value="">— icon —</option>
+                            <option value="claude-code">Claude Code</option>
+                            <option value="codex">Codex</option>
+                            <option value="openclaw">OpenClaw</option>
+                            <option value="hermes">Hermes</option>
+                            <option value="generic">Generic</option>
+                        </select>
+                        <button class="btn-secondary" id="operator-detail-save">Save</button>
+                    </div>
+                </header>
+                <div id="operator-detail-feed" class="operator-feed">
+                    <div class="empty">Loading…</div>
+                </div>
             </div>
         </section>
 
