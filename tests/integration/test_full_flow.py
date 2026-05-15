@@ -54,7 +54,7 @@ from gatewayd.db import init_conn
 from gatewayd.installer import install, parse_args
 from gatewayd.mcp import build_app
 from gatewayd.restore import restore_snapshot
-from gatewayd.transport.mtls import UpstreamClient
+from gatewayd.transport.mtls import UpstreamClient, UpstreamRegistry
 
 # Make tools/ importable
 sys.path.insert(0, str(REPO_ROOT / "tools"))
@@ -233,10 +233,10 @@ async def run() -> None:
     cfg = load_config(home / "gatewayd.toml")
     pool = await asyncpg.create_pool(cfg.backup.local_dsn, init=init_conn,
                                        min_size=1, max_size=2)
-    upstream_client = UpstreamClient(cfg.upstream)
-    await upstream_client.__aenter__()
+    registry = UpstreamRegistry(cfg.upstreams, default_name=cfg.default_upstream)
+    await registry.__aenter__()
 
-    gw_app = build_app(cfg, pool, upstream_client)
+    gw_app = build_app(cfg, pool, registry)
     gw_runner = web.AppRunner(gw_app)
     await gw_runner.setup()
     gw_site = web.TCPSite(gw_runner, "127.0.0.1", 0)
@@ -322,7 +322,7 @@ async def run() -> None:
         await gw_runner.cleanup()
         await upstream_runner.cleanup()
         await dev_edge_runner.cleanup()
-        await upstream_client.__aexit__(None, None, None)
+        await registry.__aexit__(None, None, None)
         await pool.close()
         await pconn.close()
 

@@ -15,7 +15,7 @@ from aiohttp import web
 from gatewayd.config import load
 from gatewayd.db import init_conn
 from gatewayd.mcp import build_app
-from gatewayd.transport.mtls import UpstreamClient
+from gatewayd.transport.mtls import UpstreamRegistry
 
 
 async def _run() -> None:
@@ -27,14 +27,15 @@ async def _run() -> None:
     pool = await asyncpg.create_pool(cfg.backup.local_dsn, init=init_conn,
                                      min_size=1, max_size=4)
 
-    async with UpstreamClient(cfg.upstream) as upstream:
-        app = build_app(cfg, pool, upstream)
+    async with UpstreamRegistry(cfg.upstreams, default_name=cfg.default_upstream) as registry:
+        app = build_app(cfg, pool, registry)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, cfg.mcp.listen_host, cfg.mcp.listen_port)
         await site.start()
         log.info("gatewayd listening on %s:%d", cfg.mcp.listen_host, cfg.mcp.listen_port)
-        log.info("upstream skema at %s", cfg.upstream.url)
+        log.info("registered upstreams: %s (active: %s)",
+                  ", ".join(registry.names()) or "<none>", registry.active or "<none>")
         try:
             await asyncio.Event().wait()
         except (KeyboardInterrupt, asyncio.CancelledError):

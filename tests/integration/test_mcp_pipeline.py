@@ -45,7 +45,7 @@ from gatewayd.audit import verify_chain
 from gatewayd.config import GatewayConfig, MCPConfig, UpstreamConfig, AuditConfig, BackupConfig
 from gatewayd.db import init_conn
 from gatewayd.mcp import build_app
-from gatewayd.transport.mtls import UpstreamClient
+from gatewayd.transport.mtls import UpstreamClient, UpstreamRegistry
 
 COMPOSE_DIR = REPO_ROOT / "tests" / "migrations"
 LOCAL_DSN   = "postgresql://postgres:testpass@127.0.0.1:54541/skema_local"
@@ -166,15 +166,17 @@ async def run() -> None:
     cfg = GatewayConfig(
         mcp=MCPConfig(listen_host="127.0.0.1", listen_port=0,
                        operator_secret_env="SKEMA_OPERATOR_SECRET"),
-        upstream=UpstreamConfig(url=f"http://127.0.0.1:{mock_port}/mcp",
-                                  bearer_token="mcp_test_token"),
+        upstreams={"default": UpstreamConfig(
+            url=f"http://127.0.0.1:{mock_port}/mcp",
+            bearer_token="mcp_test_token",
+        )},
         backup=BackupConfig(local_dsn=LOCAL_DSN),
         audit=AuditConfig(audit_key_env="SKEMA_AUDIT_HMAC_KEY"),
     )
     pool = await asyncpg.create_pool(LOCAL_DSN, init=init_conn, min_size=1, max_size=2)
-    upstream = UpstreamClient(cfg.upstream)
-    await upstream.__aenter__()
-    app = build_app(cfg, pool, upstream)
+    registry = UpstreamRegistry(cfg.upstreams)
+    await registry.__aenter__()
+    app = build_app(cfg, pool, registry)
     gw_runner = web.AppRunner(app)
     await gw_runner.setup()
     gw_site = web.TCPSite(gw_runner, "127.0.0.1", 0)
@@ -253,7 +255,7 @@ async def run() -> None:
     finally:
         await gw_runner.cleanup()
         await mock_runner.cleanup()
-        await upstream.__aexit__(None, None, None)
+        await registry.__aexit__(None, None, None)
         await pool.close()
 
 

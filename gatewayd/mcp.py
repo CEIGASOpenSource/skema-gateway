@@ -37,7 +37,7 @@ from aiohttp import web
 
 from gatewayd.audit import AuditEntry, write_entry
 from gatewayd.config import GatewayConfig
-from gatewayd.transport.mtls import UpstreamClient
+from gatewayd.transport.mtls import UpstreamClient, UpstreamRegistry
 
 logger = logging.getLogger("gatewayd.mcp")
 
@@ -103,12 +103,18 @@ def _extract_crossing_id(envelope: dict[str, Any]) -> uuid.UUID | None:
 class _State:
     """Shared app state attached to the aiohttp Application."""
     def __init__(self, cfg: GatewayConfig, local: asyncpg.Pool,
-                 upstream: UpstreamClient):
+                 registry: UpstreamRegistry):
         self.cfg              = cfg
         self.local            = local
-        self.upstream         = upstream
+        self.registry         = registry
         self.audit_key        = _audit_key(cfg)
         self.operator_secret  = _operator_secret(cfg)
+
+    @property
+    def upstream(self) -> UpstreamClient:
+        """The currently-active upstream client. Routes change when the
+        operator selects a different tile in the dashboard."""
+        return self.registry.active_client()
 
 
 async def _handle_mcp(request: web.Request) -> web.Response:
@@ -215,9 +221,9 @@ async def _handle_health(request: web.Request) -> web.Response:
 
 
 def build_app(cfg: GatewayConfig, local: asyncpg.Pool,
-              upstream: UpstreamClient) -> web.Application:
+              registry: UpstreamRegistry) -> web.Application:
     app = web.Application()
-    app["state"] = _State(cfg, local, upstream)
+    app["state"] = _State(cfg, local, registry)
     app.router.add_post("/mcp", _handle_mcp)
     app.router.add_get("/health", _handle_health)
 

@@ -119,3 +119,59 @@ class UpstreamError(RuntimeError):
     def __init__(self, err: dict[str, Any]):
         super().__init__(f"upstream error {err.get('code')}: {err.get('message')}")
         self.payload = err
+
+
+class UpstreamRegistry:
+    """Holds one UpstreamClient per registered container.
+
+    Each tile in the dashboard corresponds to one entry here. The active
+    tile is the one whose client the MCP relay will route through.
+    """
+
+    def __init__(self, upstreams: dict[str, UpstreamConfig], default_name: str = ""):
+        self._configs = upstreams
+        self._clients: dict[str, UpstreamClient] = {}
+        # Resolve initial active selection: configured default, or first key,
+        # or empty if no upstreams registered.
+        self._active: str = default_name or (next(iter(upstreams)) if upstreams else "")
+
+    @property
+    def active(self) -> str:
+        return self._active
+
+    def names(self) -> list[str]:
+        return list(self._configs.keys())
+
+    def config(self, name: str) -> UpstreamConfig:
+        return self._configs[name]
+
+    def configs(self) -> dict[str, UpstreamConfig]:
+        return dict(self._configs)
+
+    def select(self, name: str) -> None:
+        if name not in self._configs:
+            raise KeyError(f"unknown upstream: {name!r}")
+        self._active = name
+
+    def active_client(self) -> "UpstreamClient":
+        if not self._active:
+            raise RuntimeError("no active upstream — none registered")
+        return self._clients[self._active]
+
+    async def __aenter__(self) -> "UpstreamRegistry":
+        # Open a session for each registered upstream. Sessions are
+        # long-lived; switching active tile just routes new requests
+        # through a different one.
+        for name, cfg in self._configs.items():
+            client = UpstreamClient(cfg)
+            await client.__aenter__()
+            self._clients[name] = client
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        for client in self._clients.values():
+            try:
+                await client.__aexit__(exc_type, exc, tb)
+            except Exception:
+                pass
+        self._clients.clear()
