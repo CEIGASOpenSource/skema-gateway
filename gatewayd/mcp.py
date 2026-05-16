@@ -149,10 +149,12 @@ async def _handle_mcp(request: web.Request) -> web.Response:
     action_for_audit = _action_for_audit(method, params)
 
     # ── audit: in-flight ──
+    active_upstream = state.registry.active or None
     inflight_entry = AuditEntry(
         operator_id=operator_id, entity_id=entity_id,
         source_domain="operator", target_domain="skema",
         action=action_for_audit, params=params,
+        upstream_name=active_upstream,
     )
     async with state.local.acquire() as conn:
         await write_entry(conn, state.audit_key, inflight_entry)
@@ -188,6 +190,7 @@ async def _handle_mcp(request: web.Request) -> web.Response:
         action=action_for_audit,
         result=response_envelope.get("result") if isinstance(response_envelope.get("result"), dict) else {},
         ceigas_crossing_id=_extract_crossing_id(response_envelope),
+        upstream_name=active_upstream,
     )
     async with state.local.acquire() as conn:
         await write_entry(conn, state.audit_key, completed_entry)

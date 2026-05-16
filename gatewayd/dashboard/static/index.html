@@ -39,6 +39,19 @@
             <p class="view-sub" id="tile-grid-empty" style="display:none;">
                 No containers registered. Add <code>[upstreams.NAME]</code> entries to your <code>gatewayd.toml</code> and restart the daemon.
             </p>
+
+            <!-- Inline drill-down: operators that have routed through the
+                 clicked tile. Hidden until the user picks a tile. -->
+            <section id="container-detail" class="container-detail" hidden>
+                <header class="container-detail-head">
+                    <h2 id="container-detail-title">—</h2>
+                    <button class="btn-secondary" id="container-detail-close">Close</button>
+                </header>
+                <p class="view-sub">Operators that have routed MCP calls through this container.</p>
+                <div id="container-detail-operators" class="operator-grid">
+                    <!-- operator tiles injected by JS -->
+                </div>
+            </section>
         </section>
 
         <!-- ── STATUS ─────────────────────────────────────── -->

@@ -371,6 +371,7 @@
                 el.addEventListener('click', e => {
                     if (e.target.closest('.tile-action')) return;  // ignore action button clicks here
                     selectTile(el.dataset.name);
+                    openContainerOperators(el.dataset.name, el.dataset.displayName);
                 });
             });
             grid.querySelectorAll('.tile-action[data-action="open"]').forEach(btn => {
@@ -394,11 +395,12 @@
         if (t.active) klass.push('active');
         if (!t.has_wallpaper) klass.push('tile-fallback');
         const kindLabel = t.kind === 'service_container' ? 'Service' : 'Entity';
+        const openUrl = t.dashboard_url || t.url;
         return `
-            <div class="${klass.join(' ')}" data-name="${esc(t.name)}" style="${bg}" title="Click to make active">
+            <div class="${klass.join(' ')}" data-name="${esc(t.name)}" data-display-name="${esc(t.display_name)}" style="${bg}" title="Click to see this container's operators">
                 ${t.active ? '<div class="tile-active-badge">Active</div>' : ''}
                 <div class="tile-actions">
-                    <button class="tile-action" data-action="open" data-url="${esc(t.url)}">Open ↗</button>
+                    <button class="tile-action" data-action="open" data-url="${esc(openUrl)}">Open ↗</button>
                 </div>
                 <div class="tile-overlay">
                     <div class="tile-name">${esc(t.display_name)}</div>
@@ -406,6 +408,43 @@
                 </div>
             </div>
         `;
+    }
+
+    // ── Container → operators drill-down ──────────────
+    // When a tile body is clicked, show the operators that have routed
+    // through that container under the tile grid. Inline; uses the same
+    // operator-tile shape as the Operators view.
+    async function openContainerOperators(name, displayName) {
+        const panel = $('container-detail');
+        if (!panel) return;
+        panel.hidden = false;
+        $('container-detail-title').textContent = displayName || name;
+        const list = $('container-detail-operators');
+        list.innerHTML = '<div class="empty">Loading…</div>';
+        try {
+            const data = await fetchJSON('/api/gateway/operators?upstream=' + encodeURIComponent(name));
+            const ops = data.operators || [];
+            if (ops.length === 0) {
+                list.innerHTML = '<div class="empty">No operators have called through this container yet.</div>';
+                return;
+            }
+            list.innerHTML = ops.map(o => renderOperatorTile(o)).join('');
+            list.querySelectorAll('.operator-tile').forEach(el => {
+                el.addEventListener('click', () => {
+                    // Reuse the Operators view's detail panel — navigate there.
+                    location.hash = '#operators';
+                    openOperatorDetail(el.dataset.id, el.dataset.name, el.dataset.icon || '');
+                });
+            });
+        } catch (err) {
+            console.error('container operators', err);
+            list.innerHTML = '<div class="empty">Failed to load operators for ' + esc(displayName || name) + '.</div>';
+        }
+    }
+
+    function closeContainerDetail() {
+        const panel = $('container-detail');
+        if (panel) panel.hidden = true;
     }
 
     async function selectTile(name) {
@@ -441,6 +480,8 @@
         if (opBack) opBack.addEventListener('click', closeOperatorDetail);
         const opSave = $('operator-detail-save');
         if (opSave) opSave.addEventListener('click', saveOperatorProfile);
+        const cdClose = $('container-detail-close');
+        if (cdClose) cdClose.addEventListener('click', closeContainerDetail);
         $('btn-audit-more').addEventListener('click', () => loadAudit(false));
         $('btn-set-passphrase').addEventListener('click', setPassphrase);
         $('btn-recovery-confirmed').addEventListener('click', () => {

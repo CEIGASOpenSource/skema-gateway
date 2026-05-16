@@ -67,6 +67,9 @@ class UpstreamConfig:
     display_name:  str = ""                # human-coherent tile label
     wallpaper_url: str = ""                # absolute URL to fetch static wallpaper
     icon_slug:     str = ""                # icon hint (used when no wallpaper)
+    dashboard_url: str = ""                # where the "Open ↗" button points; falls
+                                           # back to a sensible default per kind in
+                                           # the dashboard tiles_containers_handler.
 
 
 @dataclass
