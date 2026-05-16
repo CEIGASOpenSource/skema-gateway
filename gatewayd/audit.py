@@ -35,6 +35,9 @@ class AuditEntry:
     params:             dict[str, Any] | None = None
     result:             dict[str, Any] | None = None
     ceigas_crossing_id: uuid.UUID | None = None
+    # Routing tag — which gateway tile/upstream this call routed through.
+    # NOT part of the HMAC chain (see migration 003 + write_entry below).
+    upstream_name:      str | None = None
 
 
 def _signature(key: bytes, fields: list[str]) -> bytes:
@@ -72,16 +75,19 @@ async def write_entry(local: asyncpg.Connection,
     ])
 
     # The schema stores `signature` as TEXT; hex-encode the HMAC bytes.
+    # upstream_name is intentionally outside the HMAC — it's routing metadata,
+    # so a forged value can only mislead the UI, not invalidate the signed chain.
     rec = await local.fetchrow(
         """
         INSERT INTO operator_audit_log
           (operator_id, entity_id, source_domain, target_domain,
-           action, params, result, ceigas_crossing_id, signature)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
+           action, params, result, ceigas_crossing_id, signature, upstream_name)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10)
         RETURNING log_id
         """,
         entry.operator_id, entry.entity_id, entry.source_domain, entry.target_domain,
         entry.action, params_text, result_text, entry.ceigas_crossing_id, sig.hex(),
+        entry.upstream_name,
     )
     return rec["log_id"]
 

@@ -272,8 +272,12 @@ async def operators_handler(request: web.Request) -> web.Response:
     Auto-seeds a placeholder profile for any operator_id seen in the audit
     log without one — first sight gets 'operator-<8 hex>' and no icon.
     User renames via PATCH /operators/<id>.
+
+    Optional ?upstream=<name> filter — restricts the list to operators that
+    have routed through that gateway tile (matches operator_audit_log.upstream_name).
     """
     state = _state(request)
+    upstream = request.query.get("upstream") or None
     async with state.local.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -302,6 +306,7 @@ async def operators_handler(request: web.Request) -> web.Response:
                              SELECT action, COUNT(*)::BIGINT AS cnt
                                FROM operator_audit_log a2
                               WHERE a2.operator_id = a.operator_id
+                                AND ($1::TEXT IS NULL OR a2.upstream_name = $1)
                               GROUP BY action
                               ORDER BY cnt DESC
                               LIMIT 3
@@ -310,10 +315,12 @@ async def operators_handler(request: web.Request) -> web.Response:
                   FROM operator_audit_log a
                   LEFT JOIN operator_profiles p ON p.operator_id = a.operator_id
                  WHERE a.source_domain = 'operator'
+                   AND ($1::TEXT IS NULL OR a.upstream_name = $1)
                  GROUP BY a.operator_id, p.display_name, p.icon_slug, p.kind
                  ORDER BY MAX(a.occurred_at) DESC
                  LIMIT 50
-                """
+                """,
+                upstream,
             )
 
     return web.json_response({
@@ -330,6 +337,7 @@ async def operators_handler(request: web.Request) -> web.Response:
             for r in rows
         ],
         "listen_port": state.cfg.mcp.listen_port,
+        "upstream":    upstream,
     })
 
 
@@ -540,10 +548,10 @@ async def backup_sync_now_handler(request: web.Request) -> web.Response:
 async def tiles_containers_handler(request: web.Request) -> web.Response:
     """Return the list of registered container tiles.
 
-    Each entry: {name, display_name, kind, url, active, has_wallpaper}
+    Each entry: {name, display_name, kind, url, dashboard_url, active, has_wallpaper}
     The dashboard renders one tile per entry, fetches the wallpaper via
     /api/gateway/tiles/wallpaper/<name>, and POSTs to /api/gateway/select
-    when the user clicks.
+    when the user clicks. The Open button on the tile uses `dashboard_url`.
     """
     from gatewayd.wallpaper import find_cached
     state = _state(request)
@@ -556,11 +564,24 @@ async def tiles_containers_handler(request: web.Request) -> web.Response:
             "display_name": cfg.display_name or name,
             "kind": cfg.kind,
             "url": cfg.url,
+            "dashboard_url": cfg.dashboard_url or _default_dashboard_url(cfg),
             "icon_slug": cfg.icon_slug,
             "active": (name == active),
             "has_wallpaper": find_cached(name) is not None,
         })
     return web.json_response({"tiles": out, "active": active})
+
+
+def _default_dashboard_url(cfg) -> str:
+    """Per-kind default for the Open button when `dashboard_url` is unset.
+
+    User-entity tiles open the canonical Privatae dashboard (one app, all
+    your entities). Service tiles fall back to the upstream URL — service
+    containers expose their own admin surface and don't share a dashboard.
+    """
+    if cfg.kind == "user_entity":
+        return "https://dashboard.privatae.ai"
+    return cfg.url
 
 
 async def tiles_wallpaper_handler(request: web.Request) -> web.Response:
